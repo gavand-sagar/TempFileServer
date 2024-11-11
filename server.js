@@ -1,155 +1,98 @@
 const express = require('express');
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const mongoose = require('mongoose');
-
-// Set up MongoDB connection
-mongoose.connect('mongodb+srv://admin:123@cluster0.dnyhi.mongodb.net')
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.log('MongoDB connection error: ', err));
-
-// Define a Mongoose schema and model for file metadata
-const fileSchema = new mongoose.Schema({
-  fileId: { type: String, required: true, unique: true },
-  filename: { type: String, required: true },
-  createdTime: { type: String, required: true }
-});
-
-const File = mongoose.model('File', fileSchema);
-
+const multer = require('multer');
+const { GridFSBucket } = require('mongodb');
+const Grid = require('gridfs-stream');
+const { ObjectId } = require('mongodb');
 const app = express();
-const port = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 
-// Set up file storage using multer
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, './uploads');  // save files to 'uploads' folder
-  },
-  filename: (req, file, cb) => {
-    const fileId = Date.now().toString();  // Using current timestamp as file ID
-    const extension = path.extname(file.originalname);  // Get file extension
-    cb(null, `${fileId}${extension}`);
-  }
+// MongoDB URI
+const mongoURI = 'mongodb+srv://admin:123@cluster0.dnyhi.mongodb.net/';
+
+// MongoDB and GridFS setup
+let gfs;
+mongoose.connect(mongoURI);
+const conn = mongoose.connection;
+conn.once('open', () => {
+    gfs = Grid(conn.db, mongoose.mongo);
+    gfs.collection('uploads'); // collection for GridFS
 });
 
+// Setup multer for file uploads
+const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// Ensure the uploads directory exists
-if (!fs.existsSync('./uploads')) {
-  fs.mkdirSync('./uploads');
-}
-
-// API endpoint to upload files
-app.post('/upload', upload.single('file'), async (req, res) => {
-  try {
-    const fileId = Date.now().toString();
-    const createdTime = new Date().toISOString();
-    const newFile = new File({
-      fileId,
-      filename: req.file.filename,
-      createdTime
-    });
-
-    await newFile.save();
-
-    res.status(200).json({ fileId, createdTime });
-  } catch (err) {
-    res.status(500).json({ message: 'Error uploading file', error: err });
-  }
-});
-
-// API endpoint to retrieve file details
-app.get('/file/:id', async (req, res) => {
-  try {
-    const fileId = req.params.id;
-    const file = await File.findOne({ fileId });
-
-    if (!file) {
-      return res.status(404).json({ message: 'File not found' });
-    }
-
-    res.json({
-      fileId: file.fileId,
-      filename: file.filename,
-      createdTime: file.createdTime,
-      fileUrl: `/uploads/${file.filename}`
-    });
-  } catch (err) {
-    res.status(500).json({ message: 'Error retrieving file', error: err });
-  }
-});
-
-// API endpoint to list all files
+// List all files
 app.get('/files', async (req, res) => {
-  try {
-    const files = await File.find();
-    const filesList = files.map(file => ({
-      fileId: file.fileId,
-      filename: file.filename,
-      createdTime: file.createdTime,
-      fileUrl: `/uploads/${file.fileId}`
-    }));
-
-    res.json(filesList);
-  } catch (err) {
-    res.status(500).json({ message: 'Error listing files', error: err });
-  }
+    try {
+        const files = await gfs.files.find().toArray();
+        res.json(files);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
-// API endpoint to delete a file by ID
-app.delete('/file/:id', async (req, res) => {
-  try {
-    const fileId = req.params.id;
-    const file = await File.findOne({ fileId });
-
-    if (!file) {
-      return res.status(404).json({ message: 'File not found' });
+// Retrieve a single file by ID
+app.get('/files/:id', async (req, res) => {
+    try {
+        const file = await gfs.files.findOne({ _id: new ObjectId(req.params.id) });
+        if (!file) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+        res.json(file);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
+});
 
-    // Delete the file from GridFS
-    gfs.delete(fileId, async (err) => {
-      if (err) {
-        return res.status(500).json({ message: 'Failed to delete file from GridFS' });
+// Upload a file
+app.post('/upload', upload.single('file'), (req, res) => {
+    const bucket = new GridFSBucket(conn.db, { bucketName: 'uploads' });
+    const uploadStream = bucket.openUploadStream(req.file.originalname, {
+        contentType: req.file.mimetype,
+    });
+    uploadStream.end(req.file.buffer);
+    uploadStream.on('finish', () => {
+        res.status(201).json({ fileId: uploadStream.id });
+    });
+    uploadStream.on('error', (err) => {
+        res.status(500).json({ error: err.message });
+    });
+});
+
+// Delete a file by ID
+app.delete('/files/:id', async (req, res) => {
+    try {
+        const bucket = new GridFSBucket(conn.db, { bucketName: 'uploads' });
+        await bucket.delete(new ObjectId(req.params.id));
+        res.status(204).send();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/files/:id/download', async (req, res) => {
+  try {
+      const file = await gfs.files.findOne({ _id: new ObjectId(req.params.id) });
+      if (!file) {
+          return res.status(404).json({ error: 'File not found' });
       }
 
-      // Delete the file metadata from MongoDB
-      await File.deleteOne({ fileId });
+      const bucket = new GridFSBucket(conn.db, { bucketName: 'uploads' });
+      const downloadStream = bucket.openDownloadStream(new ObjectId(req.params.id));
 
-      res.status(200).json({ message: 'File deleted successfully' });
-    });
+      res.set({
+          'Content-Type': file.contentType,
+          'Content-Disposition': `attachment; filename="${file.filename}"`,
+      });
+
+      downloadStream.pipe(res);
   } catch (err) {
-    res.status(500).json({ message: 'Error deleting file', error: err });
+      res.status(500).json({ error: err.message });
   }
 });
 
-// Serve uploaded files publicly
-app.get('/uploads/:id', async (req, res) => {
-  try {
-    const fileId = req.params.id;
-
-    // Find file metadata
-    const file = await File.findOne({ fileId });
-
-    if (!file) {
-      return res.status(404).json({ message: 'File not found' });
-    }
-
-    // Retrieve the file from GridFS
-    const downloadStream = gfs.openDownloadStreamByName(file.filename);
-
-    // Set the response headers for the file
-    res.setHeader('Content-Type', file.mimetype);
-    res.setHeader('Content-Disposition', `attachment; filename=${file.filename}`);
-
-    // Pipe the file stream to the response
-    downloadStream.pipe(res);
-  } catch (err) {
-    res.status(500).json({ message: 'Error retrieving file', error: err });
-  }
-});
-
-// Start the server
-app.listen(port, () => {
-  console.log(`File server is running at http://localhost:${port}`);
+app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
 });
