@@ -42,6 +42,19 @@ app.post('/upload', upload.single('file'), (req, res) => {
 // API to serve images
 app.use('/uploads', express.static(uploadDir));
 
+app.get('/files', (req, res, next) => {
+  fs.readdir(uploadDir, (err, files) => {
+    if (err) {
+      return next(err); // Pass error to the global error handler
+    }
+    const fileUrls = files.map(file => `${req.protocol}://${req.get('host')}/uploads/${file}`);
+    res.status(200).json({
+      message: 'List of uploaded files',
+      files: fileUrls
+    });
+  });
+});
+
 // Global error handler middleware
 app.use((err, req, res, next) => {
     console.error(err.stack); // Logs the error stack trace for debugging
@@ -51,7 +64,7 @@ app.use((err, req, res, next) => {
       status: err.status || 500
     });
   });
-  
+
 // Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
