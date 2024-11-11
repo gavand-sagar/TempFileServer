@@ -47,14 +47,19 @@ app.get('/files/:id', async (req, res) => {
 });
 
 // Upload a file
-app.post('/upload', upload.single('file'), (req, res) => {
+app.post('/upload', upload.single('file'), async (req, res) => {
     const bucket = new GridFSBucket(conn.db, { bucketName: 'uploads' });
     const uploadStream = bucket.openUploadStream(req.file.originalname, {
         contentType: req.file.mimetype,
     });
     uploadStream.end(req.file.buffer);
-    uploadStream.on('finish', () => {
-        res.status(201).json({ fileId: uploadStream.id });
+    uploadStream.on('finish', async () => {
+        const file = await gfs.files.findOne({ _id: new ObjectId(uploadStream.id) });
+        if (!file) {
+            return res.status(404).json({ error: 'File not found' });
+        }
+        res.json(file);
+        //res.status(201).json({ fileId: uploadStream.id });
     });
     uploadStream.on('error', (err) => {
         res.status(500).json({ error: err.message });
