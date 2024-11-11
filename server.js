@@ -2,115 +2,131 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
+const mongoose = require('mongoose');
+
+// Set up MongoDB connection
+mongoose.connect('mongodb+srv://admin:123@cluster0.dnyhi.mongodb.net')
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.log('MongoDB connection error: ', err));
+
+// Define a Mongoose schema and model for file metadata
+const fileSchema = new mongoose.Schema({
+  fileId: { type: String, required: true, unique: true },
+  filename: { type: String, required: true },
+  createdTime: { type: String, required: true }
+});
+
+const File = mongoose.model('File', fileSchema);
 
 const app = express();
+const port = process.env.PORT || 3000;
 
-// In-memory storage for file metadata
-const files = [];
-
-// Set up storage for uploaded files
+// Set up file storage using multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads'); // Folder to store uploaded files
+    cb(null, './uploads');  // save files to 'uploads' folder
   },
   filename: (req, file, cb) => {
-    const uniqueName = `${uuidv4()}-${file.originalname}`;
-    cb(null, uniqueName);
+    const fileId = Date.now().toString();  // Using current timestamp as file ID
+    const extension = path.extname(file.originalname);  // Get file extension
+    cb(null, `${fileId}${extension}`);
   }
 });
 
-const upload = multer({ storage: storage });
+const upload = multer({ storage });
 
-// Create 'uploads' directory if it doesn't exist
-const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
+// Ensure the uploads directory exists
+if (!fs.existsSync('./uploads')) {
+  fs.mkdirSync('./uploads');
 }
 
-// API to upload a file
-app.post('/upload', upload.single('file'), (req, res, next) => {
+// API endpoint to upload files
+app.post('/upload', upload.single('file'), async (req, res) => {
   try {
-    if (!req.file) {
-      const error = new Error('No file uploaded.');
-      error.status = 400;
-      throw error;
-    }
-
-    const fileId = uuidv4();
-    const fileInfo = {
-      id: fileId,
+    const fileId = Date.now().toString();
+    const createdTime = new Date().toISOString();
+    const newFile = new File({
+      fileId,
       filename: req.file.filename,
-      uploadTime: new Date().toISOString()
-    };
-
-    files.push(fileInfo);
-
-    res.status(200).json({
-      message: 'File uploaded successfully',
-      file: fileInfo
+      createdTime
     });
-  } catch (error) {
-    next(error);
+
+    await newFile.save();
+
+    res.status(200).json({ fileId, createdTime });
+  } catch (err) {
+    res.status(500).json({ message: 'Error uploading file', error: err });
   }
 });
 
-// API to get metadata for all uploaded files
-app.get('/files', (req, res, next) => {
-  res.status(200).json({
-    message: 'List of uploaded files',
-    files: files
-  });
-});
+// API endpoint to retrieve file details
+app.get('/file/:id', async (req, res) => {
+  try {
+    const fileId = req.params.id;
+    const file = await File.findOne({ fileId });
 
-// API to get a single file by its ID
-app.get('/files/:id', (req, res, next) => {
-  const file = files.find(f => f.id === req.params.id);
-
-  if (!file) {
-    return res.status(404).json({ message: 'File not found' });
-  }
-
-  const filePath = path.join(uploadDir, file.filename);
-  res.sendFile(filePath, err => {
-    if (err) {
-      next(err);
-    }
-  });
-});
-
-// API to delete a file by its ID
-app.delete('/files/:id', (req, res, next) => {
-  const fileIndex = files.findIndex(f => f.id === req.params.id);
-
-  if (fileIndex === -1) {
-    return res.status(404).json({ message: 'File not found' });
-  }
-
-  const file = files[fileIndex];
-  const filePath = path.join(uploadDir, file.filename);
-
-  fs.unlink(filePath, err => {
-    if (err) {
-      return next(err);
+    if (!file) {
+      return res.status(404).json({ message: 'File not found' });
     }
 
-    files.splice(fileIndex, 1);
-    res.status(200).json({ message: 'File deleted successfully' });
-  });
+    res.json({
+      fileId: file.fileId,
+      filename: file.filename,
+      createdTime: file.createdTime,
+      fileUrl: `/uploads/${file.filename}`
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Error retrieving file', error: err });
+  }
 });
 
-// Global error handler middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(err.status || 500).json({
-    message: err.message || 'An unexpected error occurred.',
-    status: err.status || 500
-  });
+// API endpoint to list all files
+app.get('/files', async (req, res) => {
+  try {
+    const files = await File.find();
+    const filesList = files.map(file => ({
+      fileId: file.fileId,
+      filename: file.filename,
+      createdTime: file.createdTime,
+      fileUrl: `/uploads/${file.filename}`
+    }));
+
+    res.json(filesList);
+  } catch (err) {
+    res.status(500).json({ message: 'Error listing files', error: err });
+  }
 });
 
-// Read port from environment variable or default to 3000
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
+// API endpoint to delete a file by ID
+app.delete('/file/:id', async (req, res) => {
+  try {
+    const fileId = req.params.id;
+    const file = await File.findOne({ fileId });
+
+    if (!file) {
+      return res.status(404).json({ message: 'File not found' });
+    }
+
+    // Delete the file from the filesystem
+    fs.unlink(path.join('./uploads', file.filename), async (err) => {
+      if (err) {
+        return res.status(500).json({ message: 'Failed to delete file from filesystem' });
+      }
+
+      // Delete the file metadata from MongoDB
+      await File.deleteOne({ fileId });
+
+      res.status(200).json({ message: 'File deleted successfully' });
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Error deleting file', error: err });
+  }
+});
+
+// Serve uploaded files publicly
+app.use('/uploads', express.static('uploads'));
+
+// Start the server
+app.listen(port, () => {
+  console.log(`File server is running at http://localhost:${port}`);
 });
