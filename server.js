@@ -88,7 +88,7 @@ app.get('/files', async (req, res) => {
       fileId: file.fileId,
       filename: file.filename,
       createdTime: file.createdTime,
-      fileUrl: `/uploads/${file.filename}`
+      fileUrl: `/uploads/${file.fileId}`
     }));
 
     res.json(filesList);
@@ -107,10 +107,10 @@ app.delete('/file/:id', async (req, res) => {
       return res.status(404).json({ message: 'File not found' });
     }
 
-    // Delete the file from the filesystem
-    fs.unlink(path.join('./uploads', file.filename), async (err) => {
+    // Delete the file from GridFS
+    gfs.delete(fileId, async (err) => {
       if (err) {
-        return res.status(500).json({ message: 'Failed to delete file from filesystem' });
+        return res.status(500).json({ message: 'Failed to delete file from GridFS' });
       }
 
       // Delete the file metadata from MongoDB
@@ -124,7 +124,30 @@ app.delete('/file/:id', async (req, res) => {
 });
 
 // Serve uploaded files publicly
-app.use('/uploads', express.static('uploads'));
+app.get('/uploads/:id', async (req, res) => {
+  try {
+    const fileId = req.params.id;
+
+    // Find file metadata
+    const file = await File.findOne({ fileId });
+
+    if (!file) {
+      return res.status(404).json({ message: 'File not found' });
+    }
+
+    // Retrieve the file from GridFS
+    const downloadStream = gfs.openDownloadStreamByName(file.filename);
+
+    // Set the response headers for the file
+    res.setHeader('Content-Type', file.mimetype);
+    res.setHeader('Content-Disposition', `attachment; filename=${file.filename}`);
+
+    // Pipe the file stream to the response
+    downloadStream.pipe(res);
+  } catch (err) {
+    res.status(500).json({ message: 'Error retrieving file', error: err });
+  }
+});
 
 // Start the server
 app.listen(port, () => {
